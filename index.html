@@ -113,21 +113,17 @@
     <!-- Canvas oculto para análisis rápido de fotogramas (Computer Vision) -->
     <canvas id="cv-canvas" class="hidden"></canvas>
   </div>
-      <!-- BARRA INFERIOR DE SELECCIÓN Y CONTROLES -->
-      <footer class="w-full flex flex-col items-center gap-2.5 pointer-events-auto">
-        
-        <!-- Carrusel Selector de Aves (Desplazable horizontalmente) -->
-        <div class="glass-panel p-2 rounded-2xl max-w-xl w-full flex items-center justify-between gap-2 shadow-2xl">
-          <span class="text-[10px] font-mono text-emerald-400/90 px-1 uppercase tracking-wider hidden sm:inline flex-shrink-0">Ave Objetivo:</span>
-          
-          <div id="bird-chips-container" class="flex items-center gap-1.5 overflow-x-auto py-1 px-1 w-full custom-scrollbar">
-            <!-- Se llenan dinámicamente con JS -->
-          </div>
 
-          <button id="btn-show-markers" class="px-2.5 py-1.5 rounded-xl text-xs font-mono bg-amber-500/20 border border-amber-500/40 text-amber-300 hover:bg-amber-500/30 transition flex items-center gap-1 flex-shrink-0" title="Ver Marcadores de Prueba">
-            <i data-lucide="qr-code" class="w-3.5 h-3.5"></i> Marcadores
-          </button>
-        </div>
+  <!-- MÁSCARA BINOCULAR DE OBSERVACIÓN Y HUD -->
+  <div id="binocular-overlay" class="fixed inset-0 z-20 binocular-mask pointer-events-none transition-opacity duration-300"></div>
+
+  <!-- CAPA DE INTERFAZ DE USUARIO (UI) -->
+  <div class="relative z-30 h-full w-full flex flex-col justify-between p-4 md:p-6 pointer-events-none">
+    
+    <!-- ENCABEZADO SUPERIOR Y TELEMETRÍA -->
+    <header class="w-full flex items-center justify-between pointer-events-auto">
+      <div class="glass-panel px-3.5 py-2 rounded-2xl flex items-center gap-2.5 shadow-xl">
+        <i data-lucide="binoculars" class="w-5 h-5 text-emerald-400"></i>
         <div>
           <h1 class="font-bold text-xs tracking-wider text-emerald-100 uppercase">Binoculares AR</h1>
           <p class="text-[9px] text-emerald-400/90 font-mono tracking-widest">AVISTAMIENTO DE AVES</p>
@@ -741,6 +737,8 @@
 
     // SEGUIMIENTO COMPUTER VISION EN TIEMPO REAL DESDE CÁMARA
     function trackMarkerFromCamera() {
+      if (!cvCtx || !videoElem) return;
+
       cvCanvas.width = 160;
       cvCanvas.height = 120;
       cvCtx.drawImage(videoElem, 0, 0, 160, 120);
@@ -750,7 +748,8 @@
 
       let sumX = 0, sumY = 0, count = 0;
 
-      for (let i = 0; i < frameData.length; i += 16) {
+      // Escaneo por muestras de píxeles buscando el patrón de color característico del marcador
+      for (let i = 0; i < frameData.length; i += 12) {
         const r = frameData[i];
         const g = frameData[i+1];
         const b = frameData[i+2];
@@ -761,7 +760,7 @@
           Math.pow(b - targetRGB[2], 2)
         );
 
-        if (distColor < 75) {
+        if (distColor < 85) {
           const pixelIdx = i / 4;
           const x = pixelIdx % 160;
           const y = Math.floor(pixelIdx / 160);
@@ -771,16 +770,17 @@
         }
       }
 
-      if (count > 15) {
+      // Si detecta suficiente densidad del marcador objetivo
+      if (count > 10) {
         const avgX = sumX / count;
         const avgY = sumY / count;
 
-        const normalizedX = (avgX / 160 - 0.5) * 3.5;
-        const normalizedY = -(avgY / 120 - 0.5) * 2.5;
+        const normalizedX = (avgX / 160 - 0.5) * 3.2;
+        const normalizedY = -(avgY / 120 - 0.5) * 2.2;
 
         targetPos.set(normalizedX, normalizedY, -2.2);
         
-        document.getElementById('ar-status-text').textContent = `ANCLADO: ${currentBird.name.toUpperCase()}`;
+        document.getElementById('ar-status-text').textContent = `MARCADOR DETECTADO: ${currentBird.name.toUpperCase()}`;
         document.getElementById('tracking-dot').className = 'w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping';
       }
     }
