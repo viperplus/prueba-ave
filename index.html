@@ -347,7 +347,6 @@
     let renderer, scene, camera;
     let anchoredGroup, birdPlaneMesh, holoRingMesh, particleSystem;
     let targetPos = new THREE.Vector3(0, 0, -3.0);
-    let targetRotation = new THREE.Euler(0, 0, 0);
 
     // COMPUTER VISION CANVASES
     let cvCanvas, cvCtx, cvOverlayCanvas, cvOverlayCtx, videoElem;
@@ -366,6 +365,7 @@
 
     function initChipsCarousel() {
       const container = document.getElementById('bird-chips-container');
+      if (!container) return;
       container.innerHTML = '';
 
       BIRD_DATABASE.forEach((bird) => {
@@ -382,10 +382,11 @@
     function initCamera() {
       videoElem = document.getElementById('camera-feed');
       cvCanvas = document.getElementById('cv-canvas');
-      cvCtx = cvCanvas.getContext('2d', { willReadFrequently: true });
+      if (!cvCanvas || !videoElem) return;
       
+      cvCtx = cvCanvas.getContext('2d', { willReadFrequently: true });
       cvOverlayCanvas = document.getElementById('cv-overlay-canvas');
-      cvOverlayCtx = cvOverlayCanvas.getContext('2d');
+      if (cvOverlayCanvas) cvOverlayCtx = cvOverlayCanvas.getContext('2d');
 
       if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
         navigator.mediaDevices.getUserMedia({
@@ -407,6 +408,8 @@
 
     function initThreeAR() {
       const canvas = document.getElementById('three-ar-canvas');
+      if (!canvas) return;
+
       renderer = new THREE.WebGLRenderer({ canvas: canvas, alpha: true, antialias: true });
       renderer.setSize(window.innerWidth, window.innerHeight);
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -445,7 +448,7 @@
         roughness: 0.3,
         metalness: 0.1,
         transparent: true,
-        opacity: 0.0 // Invisible hasta que la cámara trackee el marcador
+        opacity: 0.0 // Oculto hasta detectar el marcador
       });
       birdPlaneMesh = new THREE.Mesh(planeGeo, planeMat);
       birdPlaneMesh.position.y = 0.65;
@@ -470,149 +473,154 @@
     }
 
     function onWindowResize() {
+      if (!camera || !renderer) return;
       camera.aspect = window.innerWidth / window.innerHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(window.innerWidth, window.innerHeight);
-      if (cvOverlayCanvas) {
-        cvOverlayCanvas.width = window.innerWidth;
-        cvOverlayCanvas.height = window.innerHeight;
-      }
     }
-
-    // BUCLE DE RENDERIZADO 3D Y DETECCION AR
-    let clock = new THREE.Clock();
-    let frameCounter = 0;
 
     function animateAR() {
       requestAnimationFrame(animateAR);
-      const elapsedTime = clock.getElapsedTime();
-      frameCounter++;
 
-      // Escaneo de Computer Vision cada 3 cuadros
-      if (frameCounter % 3 === 0) {
-        processComputerVisionTracking();
-      }
+      processComputerVisionTracking();
 
-      // Suavizado del movimiento AR (Interpolación física Lerp)
-      if (isTrackingLocked) {
+      // Transición suave (Lerp) de la posición del grupo 3D
+      if (anchoredGroup) {
         anchoredGroup.position.lerp(targetPos, 0.15);
-        birdPlaneMesh.material.opacity = THREE.MathUtils.lerp(birdPlaneMesh.material.opacity, 0.95, 0.1);
-      } else {
-        birdPlaneMesh.material.opacity = THREE.MathUtils.lerp(birdPlaneMesh.material.opacity, 0.0, 0.1);
+        anchoredGroup.rotation.y += 0.005;
       }
 
-      // Animaciones 3D secundarias
-      if (birdPlaneMesh) {
-        birdPlaneMesh.position.y = 0.65 + Math.sin(elapsedTime * 2.5) * 0.04;
-      }
-      if (holoRingMesh) {
-        holoRingMesh.rotation.z = elapsedTime * 0.5;
-      }
-      if (particleSystem) {
-        particleSystem.rotation.y = elapsedTime * 0.2;
+      // Animación del plano de ave
+      if (birdPlaneMesh && birdPlaneMesh.material) {
+        birdPlaneMesh.material.opacity = THREE.MathUtils.lerp(
+          birdPlaneMesh.material.opacity,
+          isTrackingLocked ? 1.0 : 0.0,
+          0.1
+        );
       }
 
-      // Telemetría en pantalla
-      if (isTrackingLocked) {
-        const dist = anchoredGroup.position.distanceTo(camera.position);
-        document.getElementById('hud-distance').textContent = `${dist.toFixed(2)}m`;
-      } else {
-        document.getElementById('hud-distance').textContent = '--';
+      if (renderer && scene && camera) {
+        renderer.render(scene, camera);
       }
-
-      renderer.render(scene, camera);
     }
 
-    // MOTOR DE TRACKING Y VISIÓN POR COMPUTADORA (DETECCION DE MARCADORES SQUARE / COLOR)
+    // MOTOR DE TRACKING COMPUTER VISION
     function processComputerVisionTracking() {
-      if (!cvCtx || !videoElem) return;
+      if (!cvCtx || !videoElem || videoElem.readyState !== 4) return;
 
-      const w = 160;
-      const h = 120;
+      const w = 240;
+      const h = 180;
       cvCanvas.width = w;
       cvCanvas.height = h;
 
-      // Dibujar fotograma de cámara en el canvas de análisis
       cvCtx.drawImage(videoElem, 0, 0, w, h);
       const imgData = cvCtx.getImageData(0, 0, w, h);
       const data = imgData.data;
 
-      let sumX = 0, sumY = 0, matchCount = 0;
+      const gray = new Uint8ClampedArray(w * h);
+      let totalLuminance = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        const lum = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
+        gray[i / 4] = lum;
+        totalLuminance += lum;
+      }
+      const avgLuminance = totalLuminance / (w * h);
+
+      let matchX = 0, matchY = 0, matchPoints = 0;
       let minX = w, maxX = 0, minY = h, maxY = 0;
-
       const targetRGB = currentBird.targetRGB;
+      const binThreshold = avgLuminance * 0.75;
 
-      // Escanear píxeles buscando contraste y la firma de color del marcador seleccionado
-      for (let y = 0; y < h; y += 2) {
-        for (let x = 0; x < w; x += 2) {
-          const idx = (y * w + x) * 4;
-          const r = data[idx];
-          const g = data[idx+1];
-          const b = data[idx+2];
+      for (let y = 4; y < h - 4; y += 2) {
+        for (let x = 4; x < w - 4; x += 2) {
+          const idx = y * w + x;
+          const pxLum = gray[idx];
 
-          // Distancia de color RGB al marcador objetivo
-          const distColor = Math.sqrt(
-            Math.pow(r - targetRGB[0], 2) +
-            Math.pow(g - targetRGB[1], 2) +
-            Math.pow(b - targetRGB[2], 2)
-          );
+          if (pxLum < binThreshold) {
+            const diffX = Math.abs(gray[idx + 1] - gray[idx - 1]);
+            const diffY = Math.abs(gray[idx + w] - gray[idx - w]);
 
-          if (distColor < 90) {
-            sumX += x;
-            sumY += y;
-            matchCount++;
+            if (diffX + diffY > 35) {
+              const rgbIdx = idx * 4;
+              const r = data[rgbIdx];
+              const g = data[rgbIdx + 1];
+              const b = data[rgbIdx + 2];
 
-            if (x < minX) minX = x;
-            if (x > maxX) maxX = x;
-            if (y < minY) minY = y;
-            if (y > maxY) maxY = y;
+              const distColor = Math.sqrt(
+                Math.pow(r - targetRGB[0], 2) +
+                Math.pow(g - targetRGB[1], 2) +
+                Math.pow(b - targetRGB[2], 2)
+              );
+
+              if (distColor < 110 || (r > 120 && g > 120 && b < 100)) {
+                matchX += x;
+                matchY += y;
+                matchPoints++;
+
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+              }
+            }
           }
         }
       }
 
-      // Limpiar canvas overlay táctico
-      if (cvOverlayCanvas.width !== window.innerWidth) {
-        cvOverlayCanvas.width = window.innerWidth;
-        cvOverlayCanvas.height = window.innerHeight;
+      if (cvOverlayCanvas && cvOverlayCtx) {
+        if (cvOverlayCanvas.width !== window.innerWidth) {
+          cvOverlayCanvas.width = window.innerWidth;
+          cvOverlayCanvas.height = window.innerHeight;
+        }
+        cvOverlayCtx.clearRect(0, 0, cvOverlayCanvas.width, cvOverlayCanvas.height);
       }
-      cvOverlayCtx.clearRect(0, 0, cvOverlayCanvas.width, cvOverlayCanvas.height);
 
-      // Si se encuentra una densidad suficiente de marcador en la cámara
-      if (matchCount > 15) {
-        const avgX = sumX / matchCount;
-        const avgY = sumY / matchCount;
+      const boundingW = maxX - minX;
+      const boundingH = maxY - minY;
+      const aspectRatio = boundingW / Math.max(1, boundingH);
 
-        // Mapear coordenadas de la matriz de la cámara a coordenadas de espacio 3D Three.js
-        const normX = (avgX / w - 0.5) * 4.0;
-        const normY = -(avgY / h - 0.5) * 3.0;
+      if (matchPoints > 12 && aspectRatio > 0.5 && aspectRatio < 2.0 && boundingW > 15) {
+        const avgX = matchX / matchPoints;
+        const avgY = matchY / matchPoints;
 
-        // Calcular profundidad estimada según el tamaño del marcador detectado
-        const markerWidth = (maxX - minX) / w;
-        const estimatedZ = -Math.max(1.5, Math.min(4.5, 1.2 / Math.max(0.1, markerWidth)));
+        const normX = (avgX / w - 0.5) * 4.2;
+        const normY = -(avgY / h - 0.5) * 3.2;
+        const estimatedZ = -Math.max(1.2, Math.min(4.8, 2.4 / (boundingW / w)));
 
         targetPos.set(normX, normY, estimatedZ);
 
-        // Dibujar recuadro verde táctico de detección AR alrededor del marcador
-        const screenMinX = (minX / w) * cvOverlayCanvas.width;
-        const screenMaxX = (maxX / w) * cvOverlayCanvas.width;
-        const screenMinY = (minY / h) * cvOverlayCanvas.height;
-        const screenMaxY = (maxY / h) * cvOverlayCanvas.height;
+        if (cvOverlayCtx) {
+          const sMinX = (minX / w) * cvOverlayCanvas.width;
+          const sMaxX = (maxX / w) * cvOverlayCanvas.width;
+          const sMinY = (minY / h) * cvOverlayCanvas.height;
+          const sMaxY = (maxY / h) * cvOverlayCanvas.height;
 
-        cvOverlayCtx.strokeStyle = '#34d399';
-        cvOverlayCtx.lineWidth = 3;
-        cvOverlayCtx.strokeRect(screenMinX, screenMinY, screenMaxX - screenMinX, screenMaxY - screenMinY);
-        
-        // Etiqueta AR sobre la cámara
-        cvOverlayCtx.fillStyle = '#34d399';
-        cvOverlayCtx.font = '12px JetBrains Mono';
-        cvOverlayCtx.fillText(`[AR DETECTADO: ${currentBird.name.toUpperCase()}]`, screenMinX, Math.max(20, screenMinY - 8));
+          cvOverlayCtx.strokeStyle = '#34d399';
+          cvOverlayCtx.lineWidth = 3;
+          
+          const cornerLen = 15;
+          cvOverlayCtx.beginPath();
+          cvOverlayCtx.moveTo(sMinX, sMinY + cornerLen);
+          cvOverlayCtx.lineTo(sMinX, sMinY);
+          cvOverlayCtx.lineTo(sMinX + cornerLen, sMinY);
+          cvOverlayCtx.stroke();
+
+          cvOverlayCtx.beginPath();
+          cvOverlayCtx.moveTo(sMaxX - cornerLen, sMinY);
+          cvOverlayCtx.lineTo(sMaxX, sMinY);
+          cvOverlayCtx.lineTo(sMaxX, sMinY + cornerLen);
+          cvOverlayCtx.stroke();
+
+          cvOverlayCtx.fillStyle = '#34d399';
+          cvOverlayCtx.font = 'bold 12px JetBrains Mono';
+          cvOverlayCtx.fillText(`[LOCK AR: ${currentBird.name.toUpperCase()}]`, sMinX, Math.max(25, sMinY - 10));
+        }
 
         if (!isTrackingLocked) {
           isTrackingLocked = true;
           onMarkerLocked(currentBird);
         }
       } else {
-        // Buscar si el probador virtual en pantalla está visible para simulación
         const virtualMarker = document.getElementById('virtual-marker-container');
         if (virtualMarker && !virtualMarker.classList.contains('hidden')) {
           const rect = virtualMarker.getBoundingClientRect();
@@ -636,55 +644,62 @@
     }
 
     function onMarkerLocked(bird) {
-      document.getElementById('ar-status-text').textContent = `ANCLADO: ${bird.name.toUpperCase()}`;
-      document.getElementById('tracking-dot').className = 'w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping';
+      const statusText = document.getElementById('ar-status-text');
+      if (statusText) statusText.textContent = `ANCLADO: ${bird.name.toUpperCase()}`;
+      
+      const dot = document.getElementById('tracking-dot');
+      if (dot) dot.className = 'w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping';
 
-      // Mostrar ficha técnica informativa
       const card = document.getElementById('bird-info-card');
-      card.classList.remove('opacity-0', 'translate-y-8', 'pointer-events-none');
+      if (card) card.classList.remove('opacity-0', 'translate-y-8', 'pointer-events-none');
 
-      // Reproducir sonido de canto
       if (!isMuted) {
         playBirdAudioCall(bird);
       }
     }
 
     function onMarkerLost() {
-      document.getElementById('ar-status-text').textContent = 'BUSCANDO MARCADOR AR...';
-      document.getElementById('tracking-dot').className = 'w-2.5 h-2.5 rounded-full bg-amber-400';
+      const statusText = document.getElementById('ar-status-text');
+      if (statusText) statusText.textContent = 'BUSCANDO MARCADOR AR...';
+
+      const dot = document.getElementById('tracking-dot');
+      if (dot) dot.className = 'w-2.5 h-2.5 rounded-full bg-amber-400';
 
       const card = document.getElementById('bird-info-card');
-      card.classList.add('opacity-0', 'translate-y-8', 'pointer-events-none');
+      if (card) card.classList.add('opacity-0', 'translate-y-8', 'pointer-events-none');
     }
 
-    // CAMBIAR AVE DE OBJETIVO
     function setTargetBird(birdId) {
       const bird = BIRD_DATABASE.find(b => b.id === birdId);
       if (!bird) return;
 
       currentBird = bird;
 
-      // Actualizar textura 3D
-      const textureLoader = new THREE.TextureLoader();
-      textureLoader.load(bird.img, (tex) => {
-        birdPlaneMesh.material.map = tex;
-        birdPlaneMesh.material.needsUpdate = true;
-      });
+      if (birdPlaneMesh) {
+        const textureLoader = new THREE.TextureLoader();
+        textureLoader.load(bird.img, (tex) => {
+          birdPlaneMesh.material.map = tex;
+          birdPlaneMesh.material.needsUpdate = true;
+        });
+      }
 
-      // Actualizar color de holograma
-      holoRingMesh.material.color.setHex(bird.color);
+      if (holoRingMesh) {
+        holoRingMesh.material.color.setHex(bird.color);
+      }
 
-      // Actualizar centro del marcador virtual
       const hexColor = '#' + bird.color.toString(16).padStart(6, '0');
-      document.getElementById('virtual-marker-center').setAttribute('fill', hexColor);
+      const virtualCenter = document.getElementById('virtual-marker-center');
+      if (virtualCenter) virtualCenter.setAttribute('fill', hexColor);
 
-      // Actualizar información en la tarjeta
-      document.getElementById('card-bird-name').textContent = bird.name;
-      document.getElementById('card-bird-scientific').textContent = bird.scientific;
-      document.getElementById('card-bird-habitat').textContent = bird.habitat;
-      document.getElementById('card-bird-desc').textContent = bird.desc;
+      const nameEl = document.getElementById('card-bird-name');
+      if (nameEl) nameEl.textContent = bird.name;
+      const sciEl = document.getElementById('card-bird-scientific');
+      if (sciEl) sciEl.textContent = bird.scientific;
+      const habEl = document.getElementById('card-bird-habitat');
+      if (habEl) habEl.textContent = bird.habitat;
+      const descEl = document.getElementById('card-bird-desc');
+      if (descEl) descEl.textContent = bird.desc;
 
-      // Resaltar botón seleccionado en el carrusel
       document.querySelectorAll('.btn-select-target').forEach(btn => {
         if (btn.getAttribute('data-bird') === birdId) {
           btn.classList.add('border-emerald-400', 'bg-emerald-900/60');
@@ -694,9 +709,9 @@
       });
     }
 
-    // SIMULADOR DE MARCADOR VIRTUAL EN PANTALLA (DRAGGABLE)
     function setupVirtualMarkerDraggable() {
       const container = document.getElementById('virtual-marker-container');
+      if (!container) return;
       let isDragging = false;
       let offsetX, offsetY;
 
@@ -719,7 +734,6 @@
       });
     }
 
-    // SINTETIZADOR DE CANTO DE AVES (WEB AUDIO API)
     function initAudio() {
       if (!audioCtx) {
         const AudioCtx = window.AudioContext || window.webkitAudioContext;
@@ -797,178 +811,153 @@
       }
     }
 
-    // MODALES Y EVENTOS DE INTERFAZ
     function setupUIEvents() {
-      // Máscara Binocular HUD
-      document.getElementById('btn-toggle-hud').addEventListener('click', () => {
-        hudVisible = !hudVisible;
-        document.getElementById('binocular-overlay').style.opacity = hudVisible ? '1' : '0';
-        document.getElementById('center-reticle').style.opacity = hudVisible ? '1' : '0.25';
-      });
+      const btnToggleHud = document.getElementById('btn-toggle-hud');
+      if (btnToggleHud) {
+        btnToggleHud.addEventListener('click', () => {
+          hudVisible = !hudVisible;
+          document.getElementById('binocular-overlay').style.opacity = hudVisible ? '1' : '0';
+          document.getElementById('center-reticle').style.opacity = hudVisible ? '1' : '0.25';
+        });
+      }
 
-      // Audio Toggle
-      document.getElementById('btn-audio-toggle').addEventListener('click', () => {
-        isMuted = !isMuted;
-        const icon = document.getElementById('icon-audio');
-        if (isMuted) {
-          icon.setAttribute('data-lucide', 'volume-x');
-        } else {
-          icon.setAttribute('data-lucide', 'volume-2');
-          playBirdAudioCall(currentBird);
-        }
-        try { lucide.createIcons(); } catch(e){}
-      });
+      const btnAudioToggle = document.getElementById('btn-audio-toggle');
+      if (btnAudioToggle) {
+        btnAudioToggle.addEventListener('click', () => {
+          isMuted = !isMuted;
+          const icon = document.getElementById('icon-audio');
+          if (isMuted) {
+            if (icon) icon.setAttribute('data-lucide', 'volume-x');
+          } else {
+            if (icon) icon.setAttribute('data-lucide', 'volume-2');
+            playBirdAudioCall(currentBird);
+          }
+          try { lucide.createIcons(); } catch(e){}
+        });
+      }
 
-      document.getElementById('btn-play-call').addEventListener('click', () => playBirdAudioCall(currentBird));
+      const btnPlayCall = document.getElementById('btn-play-call');
+      if (btnPlayCall) {
+        btnPlayCall.addEventListener('click', () => playBirdAudioCall(currentBird));
+      }
 
-      // Resetear Posición
-      document.getElementById('btn-reset-target').addEventListener('click', () => {
-        targetPos.set(0, 0, -3.0);
-      });
+      const btnResetTarget = document.getElementById('btn-reset-target');
+      if (btnResetTarget) {
+        btnResetTarget.addEventListener('click', () => targetPos.set(0, 0, -3.0));
+      }
 
-      // Zoom Binocular
-      document.getElementById('btn-zoom-in').addEventListener('click', () => {
-        currentZoom = Math.min(2.5, currentZoom + 0.25);
-        document.getElementById('camera-feed').style.transform = `scale(${currentZoom})`;
-        document.getElementById('zoom-label').textContent = `${currentZoom.toFixed(1)}x`;
-      });
-      document.getElementById('btn-zoom-out').addEventListener('click', () => {
-        currentZoom = Math.max(1.0, currentZoom - 0.25);
-        document.getElementById('camera-feed').style.transform = `scale(${currentZoom})`;
-        document.getElementById('zoom-label').textContent = `${currentZoom.toFixed(1)}x`;
-      });
+      const btnZoomIn = document.getElementById('btn-zoom-in');
+      if (btnZoomIn) {
+        btnZoomIn.addEventListener('click', () => {
+          currentZoom = Math.min(2.5, currentZoom + 0.25);
+          document.getElementById('camera-feed').style.transform = `scale(${currentZoom})`;
+          document.getElementById('zoom-label').textContent = `${currentZoom.toFixed(1)}x`;
+        });
+      }
 
-      // Probador Virtual
+      const btnZoomOut = document.getElementById('btn-zoom-out');
+      if (btnZoomOut) {
+        btnZoomOut.addEventListener('click', () => {
+          currentZoom = Math.max(1.0, currentZoom - 0.25);
+          document.getElementById('camera-feed').style.transform = `scale(${currentZoom})`;
+          document.getElementById('zoom-label').textContent = `${currentZoom.toFixed(1)}x`;
+        });
+      }
+
       const btnVirtual = document.getElementById('btn-toggle-virtual-marker');
       const virtualContainer = document.getElementById('virtual-marker-container');
-      btnVirtual.addEventListener('click', () => {
-        virtualContainer.classList.toggle('hidden');
-        if (!virtualContainer.classList.contains('hidden')) {
-          virtualContainer.style.display = 'flex';
-        }
-      });
-      document.getElementById('btn-close-virtual-marker').addEventListener('click', () => {
-        virtualContainer.classList.add('hidden');
-      });
+      if (btnVirtual && virtualContainer) {
+        btnVirtual.addEventListener('click', () => {
+          virtualContainer.classList.toggle('hidden');
+          if (!virtualContainer.classList.contains('hidden')) {
+            virtualContainer.style.display = 'flex';
+          }
+        });
+      }
 
-      // Modales Marcadores y Catálogo
-      document.getElementById('btn-show-markers').addEventListener('click', () => openModal('markers-modal'));
-      document.getElementById('btn-close-markers').addEventListener('click', () => closeModal('markers-modal'));
-      document.getElementById('btn-toggle-catalog').addEventListener('click', () => openModal('catalog-modal'));
-      document.getElementById('btn-close-catalog').addEventListener('click', () => closeModal('catalog-modal'));
+      const btnCloseVirtual = document.getElementById('btn-close-virtual-marker');
+      if (btnCloseVirtual && virtualContainer) {
+        btnCloseVirtual.addEventListener('click', () => {
+          virtualContainer.classList.add('hidden');
+        });
+      }
 
-      // Exportar / Imprimir PDF
-      document.getElementById('btn-print-markers').addEventListener('click', () => {
-        const printWindow = window.open('', '_blank');
-        if (!printWindow) return;
+      const btnShowMarkers = document.getElementById('btn-show-markers');
+      if (btnShowMarkers) btnShowMarkers.addEventListener('click', () => openModal('markers-modal'));
+      const btnCloseMarkers = document.getElementById('btn-close-markers');
+      if (btnCloseMarkers) btnCloseMarkers.addEventListener('click', () => closeModal('markers-modal'));
 
-        let printableHTML = `
-          <!DOCTYPE html>
-          <html>
-          <head>
-            <title>Marcadores AR - Observatorio de Aves</title>
-            <style>
-              body { font-family: sans-serif; padding: 20px; text-align: center; color: #111; }
-              h1 { margin-bottom: 5px; font-size: 20px; }
-              p { font-size: 12px; color: #555; margin-bottom: 20px; }
-              .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; page-break-inside: avoid; }
-              .card { border: 2px dashed #999; padding: 15px; border-radius: 12px; display: flex; flex-direction: column; align-items: center; }
-              .marker { width: 130px; height: 130px; }
-              .title { font-weight: bold; font-size: 13px; margin-top: 8px; text-transform: uppercase; }
-              .sub { font-style: italic; font-size: 11px; color: #666; }
-            </style>
-          </head>
-          <body>
-            <h1>Marcadores AR - 22 Aves Patagónicas y Argentinas</h1>
-            <p>Apuntá la cámara a cualquiera de estos marcadores para proyectar la especie y escuchar su canto.</p>
-            <button onclick="window.print()" style="padding: 10px 20px; background: #059669; color: white; border: none; border-radius: 8px; cursor: pointer; margin-bottom: 20px; font-weight: bold;">Imprimir / Exportar PDF</button>
-            <div class="grid">
-        `;
+      const btnToggleCatalog = document.getElementById('btn-toggle-catalog');
+      if (btnToggleCatalog) btnToggleCatalog.addEventListener('click', () => openModal('catalog-modal'));
+      const btnCloseCatalog = document.getElementById('btn-close-catalog');
+      if (btnCloseCatalog) btnCloseCatalog.addEventListener('click', () => closeModal('catalog-modal'));
+    }
 
+    function populateModals() {
+      const markersGrid = document.getElementById('markers-grid');
+      if (markersGrid) {
+        markersGrid.innerHTML = '';
         BIRD_DATABASE.forEach(bird => {
           const hexColor = '#' + bird.color.toString(16).padStart(6, '0');
-          printableHTML += `
-            <div class="card">
-              <svg class="marker" viewBox="0 0 100 100">
+          const card = document.createElement('div');
+          card.className = 'bg-slate-900 border border-emerald-500/30 hover:border-emerald-400 p-3 rounded-2xl flex flex-col items-center shadow cursor-pointer hover:scale-105 transition group';
+          card.innerHTML = `
+            <div class="bg-white p-2 rounded-xl border-2 border-slate-950 flex flex-col items-center">
+              <svg class="w-20 h-20" viewBox="0 0 100 100">
                 <rect width="100" height="100" fill="black" />
                 <rect x="15" y="15" width="70" height="70" fill="white" />
                 <rect x="30" y="30" width="40" height="40" fill="black" />
                 <circle cx="50" cy="50" r="12" fill="${hexColor}" />
               </svg>
-              <div class="title">${bird.name}</div>
-              <div class="sub">${bird.scientific}</div>
+            </div>
+            <span class="text-[10px] font-bold mt-2 text-emerald-200 group-hover:text-emerald-400 uppercase text-center truncate w-full">${bird.name}</span>
+          `;
+          card.addEventListener('click', () => {
+            setTargetBird(bird.id);
+            closeModal('markers-modal');
+          });
+          markersGrid.appendChild(card);
+        });
+      }
+
+      const catalogList = document.getElementById('catalog-list');
+      if (catalogList) {
+        catalogList.innerHTML = '';
+        BIRD_DATABASE.forEach((bird, index) => {
+          const hexColor = '#' + bird.color.toString(16).padStart(6, '0');
+          const item = document.createElement('div');
+          item.className = 'bg-slate-900/90 border border-emerald-500/20 hover:border-emerald-400 p-3 rounded-2xl flex items-start gap-3 cursor-pointer transition';
+          item.innerHTML = `
+            <div class="w-10 h-10 rounded-xl flex items-center justify-center font-bold text-xs flex-shrink-0 text-white" style="background-color: ${hexColor}">
+              ${index + 1}
+            </div>
+            <div class="overflow-hidden">
+              <h4 class="font-bold text-sm text-white truncate">${bird.name}</h4>
+              <p class="text-[11px] italic text-emerald-300 font-serif truncate">${bird.scientific}</p>
+              <p class="text-[10px] text-slate-400 mt-1 line-clamp-2">${bird.desc}</p>
             </div>
           `;
+          item.addEventListener('click', () => {
+            setTargetBird(bird.id);
+            closeModal('catalog-modal');
+          });
+          catalogList.appendChild(item);
         });
+      }
 
-        printableHTML += `</div></body></html>`;
-        printWindow.document.write(printableHTML);
-        printWindow.document.close();
-      });
-    }
-
-    function populateModals() {
-      // 1. Grid Marcadores
-      const markersGrid = document.getElementById('markers-grid');
-      markersGrid.innerHTML = '';
-      BIRD_DATABASE.forEach(bird => {
-        const hexColor = '#' + bird.color.toString(16).padStart(6, '0');
-        const card = document.createElement('div');
-        card.className = 'bg-slate-900 border border-emerald-500/30 hover:border-emerald-400 p-3 rounded-2xl flex flex-col items-center shadow cursor-pointer hover:scale-105 transition group';
-        card.innerHTML = `
-          <div class="bg-white p-2 rounded-xl border-2 border-slate-950 flex flex-col items-center">
-            <svg class="w-20 h-20" viewBox="0 0 100 100">
-              <rect width="100" height="100" fill="black" />
-              <rect x="15" y="15" width="70" height="70" fill="white" />
-              <rect x="30" y="30" width="40" height="40" fill="black" />
-              <circle cx="50" cy="50" r="12" fill="${hexColor}" />
-            </svg>
-          </div>
-          <span class="text-[10px] font-bold mt-2 text-emerald-200 group-hover:text-emerald-400 uppercase text-center truncate w-full">${bird.name}</span>
-        `;
-        card.addEventListener('click', () => {
-          setTargetBird(bird.id);
-          closeModal('markers-modal');
-        });
-        markersGrid.appendChild(card);
-      });
-
-      // 2. Lista de Catálogo
-      const catalogList = document.getElementById('catalog-list');
-      catalogList.innerHTML = '';
-      BIRD_DATABASE.forEach((bird, index) => {
-        const hexColor = '#' + bird.color.toString(16).padStart(6, '0');
-        const item = document.createElement('div');
-        item.className = 'bg-slate-900/90 border border-emerald-500/20 hover:border-emerald-400 p-3 rounded-2xl flex items-start gap-3 cursor-pointer transition';
-        item.innerHTML = `
-          <div class="w-10 h-10 rounded-xl flex items-center justify-center font-bold text-xs flex-shrink-0 text-white" style="background-color: ${hexColor}">
-            ${index + 1}
-          </div>
-          <div class="overflow-hidden">
-            <h4 class="font-bold text-sm text-white truncate">${bird.name}</h4>
-            <p class="text-[11px] italic text-emerald-300 font-serif truncate">${bird.scientific}</p>
-            <p class="text-[10px] text-slate-400 mt-1 line-clamp-2">${bird.desc}</p>
-          </div>
-        `;
-        item.addEventListener('click', () => {
-          setTargetBird(bird.id);
-          closeModal('catalog-modal');
-        });
-        catalogList.appendChild(item);
-      });
-
-      // Seleccionar el primero por defecto
       setTargetBird(BIRD_DATABASE[0].id);
     }
 
     function openModal(id) {
       const modal = document.getElementById(id);
+      if (!modal) return;
       modal.classList.remove('hidden');
       setTimeout(() => modal.classList.remove('opacity-0'), 10);
     }
 
     function closeModal(id) {
       const modal = document.getElementById(id);
+      if (!modal) return;
       modal.classList.add('opacity-0');
       setTimeout(() => modal.classList.add('hidden'), 300);
     }
