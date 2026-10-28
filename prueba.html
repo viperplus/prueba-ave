@@ -1,0 +1,1161 @@
+<!DOCTYPE html>
+<html lang="es" class="h-full bg-slate-950 text-slate-100 select-none">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Binoculares AR - Observador de Aves Patagónicas y Argentinas</title>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <!-- Three.js para renderizado 3D y Anclaje AR -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            emerald: {
+              400: '#34d399',
+              500: '#10b981',
+              900: '#064e3b',
+              950: '#022c22',
+            }
+          },
+          fontFamily: {
+            sans: ['Inter', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace']
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+    /* Binocular Viewport Overlay */
+    .binocular-mask {
+      background: radial-gradient(circle at 35% 50%, transparent 22%, rgba(2, 10, 6, 0.96) 36%),
+                  radial-gradient(circle at 65% 50%, transparent 22%, rgba(2, 10, 6, 0.96) 36%);
+      box-shadow: inset 0 0 140px rgba(0,0,0,0.95);
+      transition: opacity 0.4s ease;
+    }
+
+    @media (max-width: 640px) {
+      .binocular-mask {
+        background: radial-gradient(circle at 50% 48%, transparent 33%, rgba(2, 10, 6, 0.96) 54%);
+      }
+    }
+
+    .reticle-pulse {
+      animation: pulse-ring 2.5s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
+    }
+
+    @keyframes pulse-ring {
+      0% { transform: scale(0.96); opacity: 0.7; }
+      50% { transform: scale(1.04); opacity: 1; }
+      100% { transform: scale(0.96); opacity: 0.7; }
+    }
+
+    .glass-panel {
+      background: rgba(4, 24, 16, 0.88);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      border: 1px solid rgba(52, 211, 153, 0.25);
+    }
+
+    .scanline {
+      background: linear-gradient(
+        to bottom,
+        rgba(255,255,255,0),
+        rgba(52, 211, 153, 0.3) 50%,
+        rgba(255,255,255,0)
+      );
+      animation: scan 3s linear infinite;
+    }
+
+    @keyframes scan {
+      0% { transform: translateY(-100%); }
+      100% { transform: translateY(1000%); }
+    }
+
+    /* Scrollbar personalizada para selector de aves */
+    .custom-scrollbar::-webkit-scrollbar {
+      height: 6px;
+      width: 6px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-track {
+      background: rgba(2, 44, 34, 0.5);
+      border-radius: 8px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-thumb {
+      background: rgba(52, 211, 153, 0.4);
+      border-radius: 8px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+      background: rgba(52, 211, 153, 0.8);
+    }
+  </style>
+</head>
+<body class="h-full w-full overflow-hidden font-sans bg-black text-slate-100 flex flex-col justify-between">
+
+  <!-- CAMERA FEED & THREE.JS 3D AR CANVAS -->
+  <div id="ar-view-container" class="fixed inset-0 z-0 bg-slate-950 overflow-hidden">
+    <video id="camera-feed" autoplay playsinline muted class="w-full h-full object-cover transition-transform duration-200"></video>
+    
+    <!-- AR Canvas: Renderiza la tarjeta 3D anclada visualmente al marcador detectado por la cámara -->
+    <canvas id="three-ar-canvas" class="absolute inset-0 w-full h-full pointer-events-none z-10"></canvas>
+
+    <!-- Canvas oculto para análisis rápido de fotogramas (Computer Vision) -->
+    <canvas id="cv-canvas" class="hidden"></canvas>
+  </div>
+      <!-- BARRA INFERIOR DE SELECCIÓN Y CONTROLES -->
+      <footer class="w-full flex flex-col items-center gap-2.5 pointer-events-auto">
+        
+        <!-- Carrusel Selector de Aves (Desplazable horizontalmente) -->
+        <div class="glass-panel p-2 rounded-2xl max-w-xl w-full flex items-center justify-between gap-2 shadow-2xl">
+          <span class="text-[10px] font-mono text-emerald-400/90 px-1 uppercase tracking-wider hidden sm:inline flex-shrink-0">Ave Objetivo:</span>
+          
+          <div id="bird-chips-container" class="flex items-center gap-1.5 overflow-x-auto py-1 px-1 w-full custom-scrollbar">
+            <!-- Se llenan dinámicamente con JS -->
+          </div>
+
+          <button id="btn-show-markers" class="px-2.5 py-1.5 rounded-xl text-xs font-mono bg-amber-500/20 border border-amber-500/40 text-amber-300 hover:bg-amber-500/30 transition flex items-center gap-1 flex-shrink-0" title="Ver Marcadores de Prueba">
+            <i data-lucide="qr-code" class="w-3.5 h-3.5"></i> Marcadores
+          </button>
+        </div>
+        <div>
+          <h1 class="font-bold text-xs tracking-wider text-emerald-100 uppercase">Binoculares AR</h1>
+          <p class="text-[9px] text-emerald-400/90 font-mono tracking-widest">AVISTAMIENTO DE AVES</p>
+        </div>
+      </div>
+
+      <!-- Estado de Rastreo & Controles Rápidos -->
+      <div class="flex items-center gap-2 pointer-events-auto">
+        <div class="glass-panel px-3 py-2 rounded-2xl flex items-center gap-2 text-xs font-mono text-emerald-300 shadow-xl">
+          <span id="tracking-dot" class="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
+          <span id="ar-status-text" class="text-[10px] md:text-[11px] font-semibold tracking-wide uppercase">ESCANEAR MARCADOR AR</span>
+        </div>
+
+        <button id="btn-toggle-catalog" class="glass-panel hover:bg-emerald-900/50 px-3 py-2 rounded-2xl text-emerald-300 hover:text-white transition active:scale-95 flex items-center gap-1.5 text-xs font-semibold" title="Ver catálogo completo de 22 aves">
+          <i data-lucide="bird" class="w-4 h-4 text-emerald-400"></i>
+          <span class="hidden sm:inline">22 Aves</span>
+        </button>
+
+        <!-- Conmutar Vista Binocular -->
+        <button id="btn-toggle-hud" class="glass-panel hover:bg-emerald-900/50 p-2 rounded-2xl text-emerald-300 hover:text-white transition active:scale-95" title="Alternar Máscara Binocular">
+          <i data-lucide="eye" class="w-5 h-5"></i>
+        </button>
+      </div>
+    </header>
+
+    <!-- RETÍCULA DE ENFOQUE CENTRAL -->
+    <div id="center-reticle" class="relative w-full max-w-xs md:max-w-sm mx-auto aspect-square flex items-center justify-center pointer-events-none">
+      <!-- Círculos de Retícula -->
+      <div class="absolute inset-0 border border-emerald-500/20 rounded-full flex items-center justify-center reticle-pulse">
+        <div class="w-3/4 h-3/4 border border-emerald-400/30 rounded-full border-dashed flex items-center justify-center">
+          <div class="w-1/2 h-1/2 border border-amber-400/30 rounded-full"></div>
+        </div>
+      </div>
+
+      <!-- Mira En Cruz -->
+      <div class="absolute w-full h-[1px] bg-gradient-to-r from-transparent via-emerald-500/40 to-transparent"></div>
+      <div class="absolute h-full w-[1px] bg-gradient-to-b from-transparent via-emerald-500/40 to-transparent"></div>
+
+      <!-- Indicadores Telemétricos -->
+      <div class="absolute top-4 text-[10px] font-mono text-emerald-400/80 tracking-widest bg-slate-950/80 px-2.5 py-1 rounded-xl border border-emerald-500/30">DIST: <span id="hud-distance">1.20m</span></div>
+      <div class="absolute bottom-4 text-[10px] font-mono text-emerald-400/80 tracking-widest bg-slate-950/80 px-2.5 py-1 rounded-xl border border-emerald-500/30">ZOOM: <span id="zoom-label">1.0x</span></div>
+
+      <!-- Efecto Escáner -->
+      <div class="absolute inset-8 rounded-full overflow-hidden pointer-events-none opacity-25">
+        <div class="w-full h-full scanline"></div>
+      </div>
+    </div>
+
+    <!-- BARRA INFERIOR DE SELECCIÓN Y CONTROLES -->
+    <footer class="w-full flex flex-col items-center gap-2.5 pointer-events-auto">
+      
+      <!-- Carrusel Selector de Aves (Desplazable horizontalmente) -->
+      <div class="glass-panel p-2 rounded-2xl max-w-xl w-full flex items-center justify-between gap-2 shadow-2xl">
+        <span class="text-[10px] font-mono text-emerald-400/90 px-1 uppercase tracking-wider hidden sm:inline flex-shrink-0">Ave Objetivo:</span>
+        
+        <div id="bird-chips-container" class="flex items-center gap-1.5 overflow-x-auto py-1 px-1 w-full custom-scrollbar">
+          <!-- Se llenan dinámicamente con JS -->
+        </div>
+
+        <button id="btn-show-markers" class="px-2.5 py-1.5 rounded-xl text-xs font-mono bg-amber-500/20 border border-amber-500/40 text-amber-300 hover:bg-amber-500/30 transition flex items-center gap-1 flex-shrink-0" title="Ver Marcadores de Prueba">
+          <i data-lucide="qr-code" class="w-3.5 h-3.5"></i> Marcador
+        </button>
+      </div>
+
+      <!-- Fila de Herramientas -->
+      <div class="flex items-center gap-3">
+        <!-- Sonido Activar / Silenciar -->
+        <button id="btn-audio-toggle" class="glass-panel p-2.5 rounded-2xl text-emerald-300 hover:text-white transition active:scale-90" title="Canto del Ave">
+          <i data-lucide="volume-2" id="icon-audio" class="w-5 h-5"></i>
+        </button>
+
+        <!-- Reorganizar / Resetear Anclaje AR -->
+        <button id="btn-reset-target" class="glass-panel border border-emerald-500/40 text-emerald-200 px-4 py-2 rounded-2xl text-xs font-bold tracking-wider hover:bg-emerald-900/40 transition active:scale-95 flex items-center gap-2">
+          <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+          <span>REINICIAR ANCLAJE AR</span>
+        </button>
+
+        <!-- Zoom Binocular -->
+        <div class="flex items-center glass-panel rounded-2xl p-0.5">
+          <button id="btn-zoom-out" class="p-2 text-emerald-300 hover:text-white transition"><i data-lucide="minus" class="w-4 h-4"></i></button>
+          <button id="btn-zoom-in" class="p-2 text-emerald-300 hover:text-white transition"><i data-lucide="plus" class="w-4 h-4"></i></button>
+        </div>
+      </div>
+    </footer>
+  </div>
+
+  <!-- TARJETA FLOTANTE CON INFORMACIÓN DETALLADA DEL AVE -->
+  <div id="bird-info-card" class="fixed bottom-24 right-4 z-40 max-w-xs md:max-w-sm w-full glass-panel rounded-3xl p-4 border border-emerald-400/40 shadow-2xl transition-all duration-500 transform translate-y-8 opacity-0 pointer-events-none">
+    <div class="flex items-start justify-between gap-2 border-b border-emerald-500/20 pb-2 mb-2.5">
+      <div>
+        <span class="text-[9px] font-mono text-emerald-400 tracking-wider uppercase block">DETECCION AR EN TIEMPO REAL</span>
+        <h3 id="card-bird-name" class="font-bold text-base text-white">--</h3>
+        <p id="card-bird-scientific" class="text-xs italic text-emerald-300 font-serif">--</p>
+      </div>
+      <button id="btn-play-call" class="w-10 h-10 rounded-2xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 flex items-center justify-center transition active:scale-90 shadow-lg pointer-events-auto" title="Reproducir canto">
+        <i data-lucide="volume-2" class="w-5 h-5"></i>
+      </button>
+    </div>
+
+    <div class="space-y-2 text-xs text-slate-300">
+      <div class="grid grid-cols-2 gap-1.5 text-[11px]">
+        <div class="bg-slate-900/80 p-2 rounded-xl border border-white/5">
+          <span class="text-[9px] font-mono text-emerald-400/70 block uppercase">HÁBITAT</span>
+          <span id="card-bird-habitat" class="font-medium text-slate-200">--</span>
+        </div>
+        <div class="bg-slate-900/80 p-2 rounded-xl border border-white/5">
+          <span class="text-[9px] font-mono text-emerald-400/70 block uppercase">ESTADO</span>
+          <span id="card-bird-status" class="font-medium text-emerald-400">Nativa / Común</span>
+        </div>
+      </div>
+      <p id="card-bird-desc" class="text-[11px] leading-relaxed bg-slate-900/40 p-2 rounded-xl border border-white/5 max-h-24 overflow-y-auto custom-scrollbar">--</p>
+    </div>
+  </div>
+
+  <!-- MODAL DE MARCADORES PARA ESCANEAR -->
+  <div id="markers-modal" class="fixed inset-0 z-50 bg-black/85 backdrop-blur-md hidden opacity-0 transition-opacity duration-300 flex items-center justify-center p-4">
+    <div class="glass-panel max-w-2xl w-full rounded-3xl p-5 border border-emerald-500/30 text-slate-200 flex flex-col max-h-[85vh]">
+      <div class="flex justify-between items-center border-b border-emerald-500/20 pb-3 mb-3">
+        <h3 class="font-bold text-sm md:text-base text-emerald-200 flex items-center gap-2">
+          <i data-lucide="qr-code" class="w-5 h-5 text-emerald-400"></i> Marcadores de Prueba AR
+        </h3>
+        <div class="flex items-center gap-2">
+          <button id="btn-print-markers" class="px-3 py-1.5 rounded-xl text-xs font-semibold bg-emerald-500 hover:bg-emerald-400 text-slate-950 transition flex items-center gap-1.5 shadow-lg">
+            <i data-lucide="printer" class="w-4 h-4"></i> Imprimir Marcadores
+          </button>
+          <button id="btn-close-markers" class="p-1 rounded-full hover:bg-slate-800 text-slate-400 hover:text-white">
+            <i data-lucide="x" class="w-5 h-5"></i>
+          </button>
+        </div>
+      </div>
+      <p class="text-xs text-slate-300 mb-3">
+        Podés escanear estos marcadores directamente en pantalla desde otra pantalla/celular o imprimirlos. Apuntá la cámara para detectar la especie y fijar la ficha 3D con su canto:
+      </p>
+
+      <div id="markers-grid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 overflow-y-auto p-1 custom-scrollbar">
+        <!-- Marcadores dinámicos cargados con JS -->
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL CATÁLOGO COMPLETO DE 22 AVES -->
+  <div id="catalog-modal" class="fixed inset-0 z-50 bg-black/85 backdrop-blur-md hidden opacity-0 transition-opacity duration-300 flex items-center justify-center p-4">
+    <div class="glass-panel max-w-2xl w-full rounded-3xl p-5 border border-emerald-500/30 text-slate-200 flex flex-col max-h-[85vh]">
+      <div class="flex justify-between items-center border-b border-emerald-500/20 pb-3 mb-3">
+        <h3 class="font-bold text-base text-emerald-200 flex items-center gap-2">
+          <i data-lucide="book-open" class="w-5 h-5 text-emerald-400"></i> Catálogo de Aves (22 Especies)
+        </h3>
+        <button id="btn-close-catalog" class="p-1 rounded-full hover:bg-slate-800 text-slate-400 hover:text-white">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+
+      <div id="catalog-list" class="grid grid-cols-1 sm:grid-cols-2 gap-2.5 overflow-y-auto p-1 custom-scrollbar">
+        <!-- Llenado dinámico vía JS -->
+      </div>
+    </div>
+  </div>
+
+  <!-- LOGICA AR, THREE.JS, SINTETIZADOR DE CANTO Y DATOS -->
+  <script>
+    // BASE DE DATOS COMPLETA DE LAS 22 AVES SOLICITADAS
+    const BIRD_DATABASE = [
+      {
+        id: 'benteveo',
+        name: 'Benteveo',
+        scientific: 'Pitangus sulphuratus',
+        habitat: 'Zonas arboladas y pobladas',
+        desc: 'Inconfundible por su antifaz negro, corona amarilla e intenso pecho amarillo. Su canto emite claramente un vocal "bien-te-veo".',
+        color: 0xeab308,
+        targetRGB: [234, 179, 8],
+        audioFreq: 2100,
+        audioType: 'benteveo',
+        img: 'https://images.unsplash.com/photo-1552728089-57bdde30beb3?auto=format&fit=crop&w=600&q=80'
+      },
+      {
+        id: 'cabezanegra',
+        name: 'Cabecita Negra',
+        scientific: 'Spinus magellanicus',
+        habitat: 'Bosques y áreas cultivadas',
+        desc: 'Pequeño pájaro cantor. El macho posee una capuchón negro contrastando con el cuerpo amarillo oliváceo. Canto trinado y melodioso.',
+        color: 0xca8a04,
+        targetRGB: [202, 138, 4],
+        audioFreq: 3200,
+        audioType: 'trill',
+        img: 'https://images.unsplash.com/photo-1606567595334-d39972c85dbe?auto=format&fit=crop&w=600&q=80'
+      },
+      {
+        id: 'calandria-grande',
+        name: 'Calandria Grande',
+        scientific: 'Mimus saturninus',
+        habitat: 'Matorrales y jardines',
+        desc: 'Gran imitadora del canto de otras aves. De plumaje pardo grisáceo con ceja blanca muy notable y cola larga con puntas blancas.',
+        color: 0xa1a1aa,
+        targetRGB: [161, 161, 170],
+        audioFreq: 2600,
+        audioType: 'mimic',
+        img: 'https://images.unsplash.com/photo-1549608276-5786777e6587?auto=format&fit=crop&w=600&q=80'
+      },
+      {
+        id: 'chimango',
+        name: 'Chimango',
+        scientific: 'Milvago chimango',
+        habitat: 'Campos, estepas y zonas urbanas',
+        desc: 'Rapaz carroñera y cazadora oportuna de color pardo con manchas claras bajo las alas. Muy adaptativa y común en todo el país.',
+        color: 0x78350f,
+        targetRGB: [120, 53, 15],
+        audioFreq: 1400,
+        audioType: 'scream',
+        img: 'https://images.unsplash.com/photo-1611095790444-1dfa35e37b52?auto=format&fit=crop&w=600&q=80'
+      },
+      {
+        id: 'chingolo',
+        name: 'Chingolo',
+        scientific: 'Zonotrichia capensis',
+        habitat: 'Jardines, campos y montes',
+        desc: 'Muy popular. Presenta un característico copete grisáceo y un collar castaño rojizo en la nuca. Canto alegre de tres o cuatro notas.',
+        color: 0x9a3412,
+        targetRGB: [154, 52, 18],
+        audioFreq: 2900,
+        audioType: 'chingolo',
+        img: 'https://images.unsplash.com/photo-1522921193457-27ddd5229b6a?auto=format&fit=crop&w=600&q=80'
+      },
+      {
+        id: 'cotorra',
+        name: 'Cotorra',
+        scientific: 'Myiopsitta monachus',
+        habitat: 'Arboledas y áreas agrícolas',
+        desc: 'Verde brillante con pecho gris. Construye enormes nidos comunitarios de palitos en las copas de los árboles o torres.',
+        color: 0x22c55e,
+        targetRGB: [34, 197, 94],
+        audioFreq: 2800,
+        audioType: 'squawk',
+        img: 'https://images.unsplash.com/photo-1552728089-57bdde30beb3?auto=format&fit=crop&w=600&q=80'
+      },
+      {
+        id: 'golondrina-parda',
+        name: 'Golondrina Parda',
+        scientific: 'Progne tapera',
+        habitat: 'Cuerpos de agua y campos',
+        desc: 'Plumaje pardo uniforme arriba y vientre blanco con faja pectoral parda. Suele nidificar en nidos viejos de hornero.',
+        color: 0x57534e,
+        targetRGB: [87, 83, 78],
+        audioFreq: 3100,
+        audioType: 'chirp',
+        img: 'https://images.unsplash.com/photo-1552728089-57bdde30beb3?auto=format&fit=crop&w=600&q=80'
+      },
+      {
+        id: 'golondrina-patagonica',
+        name: 'Golondrina Patagónica',
+        scientific: 'Tachycineta leucopyga',
+        habitat: 'Lagos, ríos y estepas sureñas',
+        desc: 'Dorso azul oscuro metalizado, rabadilla blanca deslumbrante y vientre totalmente blanco. Típica de la Patagonia.',
+        color: 0x1e3a8a,
+        targetRGB: [30, 58, 138],
+        audioFreq: 3400,
+        audioType: 'chirp',
+        img: 'https://images.unsplash.com/photo-1606567595334-d39972c85dbe?auto=format&fit=crop&w=600&q=80'
+      },
+      {
+        id: 'golondrina-tijereta',
+        name: 'Golondrina Tijerita',
+        scientific: 'Hirundo rustica',
+        habitat: 'Espacios abiertos y rurales',
+        desc: 'Migratoria. Exhibe dorso azul acero, garganta rojiza y una cola profundamente bifurcada en forma de tijera.',
+        color: 0x1d4ed8,
+        targetRGB: [29, 78, 216],
+        audioFreq: 3500,
+        audioType: 'chirp',
+        img: 'https://images.unsplash.com/photo-1552728089-57bdde30beb3?auto=format&fit=crop&w=600&q=80'
+      },
+      {
+        id: 'gorrion',
+        name: 'Gorrión',
+        scientific: 'Passer domesticus',
+        habitat: 'Ciudades y zonas urbanas',
+        desc: 'Especie introducida muy adaptada al hombre. El macho exhibe babero negro y dorso pardo veteado.',
+        color: 0xb45309,
+        targetRGB: [180, 83, 9],
+        audioFreq: 2700,
+        audioType: 'chirp',
+        img: 'https://images.unsplash.com/photo-1522921193457-27ddd5229b6a?auto=format&fit=crop&w=600&q=80'
+      },
+      {
+        id: 'hornero',
+        name: 'Hornero',
+        scientific: 'Furnarius rufus',
+        habitat: 'Campos y parques urbanos',
+        desc: 'Ave Nacional Argentina. Famoso por construir su característico nido de barro. Canto estridulado a dúo.',
+        color: 0xd97706,
+        targetRGB: [217, 119, 6],
+        audioFreq: 2400,
+        audioType: 'duet',
+        img: 'https://images.unsplash.com/photo-1606567595334-d39972c85dbe?auto=format&fit=crop&w=600&q=80'
+      },
+      {
+        id: 'jilguero-dorado',
+        name: 'Jilguero Dorado',
+        scientific: 'Sicalis flaveola',
+        habitat: 'Pastizales y arbustales',
+        desc: 'Macho de un color amarillo dorado fulgurante con frente anaranjada. Canto muy variado y melodioso.',
+        color: 0xf59e0b,
+        targetRGB: [245, 158, 11],
+        audioFreq: 3300,
+        audioType: 'trill',
+        img: 'https://images.unsplash.com/photo-1552728089-57bdde30beb3?auto=format&fit=crop&w=600&q=80'
+      },
+      {
+        id: 'loica',
+        name: 'Loica',
+        scientific: 'Leistes loyca',
+        habitat: 'Pastizales y estepa patagónica',
+        desc: 'Impresionante pecho de color rojo carmesí encendido contrastando con el dorso pardo oscuro. Canto potente.',
+        color: 0xd97706,
+        targetRGB: [220, 38, 38],
+        audioFreq: 2300,
+        audioType: 'loica',
+        img: 'https://images.unsplash.com/photo-1549608276-5786777e6587?auto=format&fit=crop&w=600&q=80'
+      },
+      {
+        id: 'loro-barranquero',
+        name: 'Loro Barranquero',
+        scientific: 'Cyanoliseus patagonus',
+        habitat: 'Barrancas de ríos y estepas',
+        desc: 'Loro gregario y ruidoso de cola larga. Cabeza olivácea, abdomen rojo con amarillo y alas azuladas. Anida en cuevas.',
+        color: 0x15803d,
+        targetRGB: [21, 128, 61],
+        audioFreq: 1800,
+        audioType: 'squawk',
+        img: 'https://images.unsplash.com/photo-1552728089-57bdde30beb3?auto=format&fit=crop&w=600&q=80'
+      },
+      {
+        id: 'naranjero',
+        name: 'Naranjero',
+        scientific: 'Rauenia bonariensis',
+        habitat: 'Bosques y arboledas',
+        desc: 'Macho vistoso con cabeza azul violácea, espalda negra y vientre anaranjado brillante. Muy frugívoro.',
+        color: 0xea580c,
+        targetRGB: [234, 88, 12],
+        audioFreq: 2700,
+        audioType: 'trill',
+        img: 'https://images.unsplash.com/photo-1606567595334-d39972c85dbe?auto=format&fit=crop&w=600&q=80'
+      },
+      {
+        id: 'paloma-manchada',
+        name: 'Paloma Manchada',
+        scientific: 'Patagioenas maculosa',
+        habitat: 'Zonas rurales y arboledas',
+        desc: 'Paloma silvestre grisácea con finas pecas o manchas alares blancas sobre dorso pardo. Arruyo profundo.',
+        color: 0x6b7280,
+        targetRGB: [107, 114, 128],
+        audioFreq: 600,
+        audioType: 'coo',
+        img: 'https://images.unsplash.com/photo-1522921193457-27ddd5229b6a?auto=format&fit=crop&w=600&q=80'
+      },
+      {
+        id: 'paloma-picazuro',
+        name: 'Paloma Picazuro',
+        scientific: 'Patagioenas picazuro',
+        habitat: 'Bosques y campos abiertos',
+        desc: 'Paloma de gran tamaño con escamado iridiscente en el cuello y faja blanca en el ala visible al volar.',
+        color: 0x4b5563,
+        targetRGB: [75, 85, 99],
+        audioFreq: 550,
+        audioType: 'coo',
+        img: 'https://images.unsplash.com/photo-1522921193457-27ddd5229b6a?auto=format&fit=crop&w=600&q=80'
+      },
+      {
+        id: 'ratona',
+        name: 'Ratona Común',
+        scientific: 'Troglodytes aedon',
+        habitat: 'Jardines, matorrales y huecos',
+        desc: 'Muy pequeña y movediza de plumaje pardo barrado. Cola erguida y un potente canto melodioso que sorprende por su tamaño.',
+        color: 0xa16207,
+        targetRGB: [161, 98, 7],
+        audioFreq: 3600,
+        audioType: 'trill',
+        img: 'https://images.unsplash.com/photo-1549608276-5786777e6587?auto=format&fit=crop&w=600&q=80'
+      },
+      {
+        id: 'tero',
+        name: 'Tero',
+        scientific: 'Vanellus chilensis',
+        habitat: 'Pastizales, canchas y humedales',
+        desc: 'Ave territorial con espolones en las alas y copete fino nucal. Emite un estridente grito "teru-teru" ante intrusos.',
+        color: 0x0f766e,
+        targetRGB: [15, 118, 110],
+        audioFreq: 2200,
+        audioType: 'tero',
+        img: 'https://images.unsplash.com/photo-1611095790444-1dfa35e37b52?auto=format&fit=crop&w=600&q=80'
+      },
+      {
+        id: 'torcaza',
+        name: 'Torcaza',
+        scientific: 'Zenaida auriculata',
+        habitat: 'Ciudades, poblados y campos',
+        desc: 'La palomita más abundante. De plumaje pardo rosado con manchas negras en las alas y manchas doradas al lado del cuello.',
+        color: 0x9f1239,
+        targetRGB: [159, 18, 57],
+        audioFreq: 650,
+        audioType: 'coo',
+        img: 'https://images.unsplash.com/photo-1522921193457-27ddd5229b6a?auto=format&fit=crop&w=600&q=80'
+      },
+      {
+        id: 'tordo-renegrido',
+        name: 'Tordo Renegrido',
+        scientific: 'Molothrus bonariensis',
+        habitat: 'Campos y plazas',
+        desc: 'Macho totalmente negro con un brillo violáceo iridiscente. Parasita nidos de otras aves como el chingolo o la calandria.',
+        color: 0x312e81,
+        targetRGB: [49, 46, 129],
+        audioFreq: 2500,
+        audioType: 'whistle',
+        img: 'https://images.unsplash.com/photo-1606567595334-d39972c85dbe?auto=format&fit=crop&w=600&q=80'
+      },
+      {
+        id: 'zorzal-patagonico',
+        name: 'Zorzal Patagónico',
+        scientific: 'Turdus falcklandii',
+        habitat: 'Bosques andino-patagónicos y jardines',
+        desc: 'Cabeza negruzca con pico y patas amarillo anaranjado intenso. Vientre ocráceo. Emite un bello canto matutino.',
+        color: 0xc2410c,
+        targetRGB: [194, 65, 12],
+        audioFreq: 2000,
+        audioType: 'zorzal',
+        img: 'https://images.unsplash.com/photo-1549608276-5786777e6587?auto=format&fit=crop&w=600&q=80'
+      }
+    ];
+
+    // ESTADO GLOBAL
+    let currentBird = BIRD_DATABASE[0];
+    let cameraStream = null;
+    let audioCtx = null;
+    let isMuted = false;
+    let hudVisible = true;
+    let currentZoom = 1.0;
+
+    // MOTOR THREE.JS AR
+    let renderer, scene, camera;
+    let anchoredGroup, birdPlaneMesh, holoRingMesh, particleSystem;
+    let targetPos = new THREE.Vector3(0, 0, -2.5);
+
+    // COMPUTER VISION CANVAS
+    let cvCanvas, cvCtx, videoElem;
+
+    // INICIALIZACIÓN
+    window.addEventListener('load', () => {
+      try { lucide.createIcons(); } catch (e) {}
+
+      initChipsCarousel();
+      initCamera();
+      initThreeAR();
+      setupUIEvents();
+      populateModals();
+      setAnchoredBird(BIRD_DATABASE[0].id);
+    });
+
+    // POBLAR CARROUSEL INFERIOR
+    function initChipsCarousel() {
+      const container = document.getElementById('bird-chips-container');
+      container.innerHTML = '';
+
+      BIRD_DATABASE.forEach((bird) => {
+        const btn = document.createElement('button');
+        btn.setAttribute('data-bird', bird.id);
+        btn.className = `btn-select-target px-3 py-1.5 rounded-xl text-xs font-semibold bg-emerald-950/80 border border-emerald-500/40 text-emerald-200 hover:border-emerald-400 transition active:scale-95 flex items-center gap-1.5 flex-shrink-0`;
+        
+        // Convertir entero hex a CSS color
+        const hexColor = '#' + bird.color.toString(16).padStart(6, '0');
+        btn.innerHTML = `<span class="w-2.5 h-2.5 rounded-full flex-shrink-0" style="background-color: ${hexColor}"></span> <span>${bird.name}</span>`;
+        
+        btn.addEventListener('click', () => setAnchoredBird(bird.id));
+        container.appendChild(btn);
+      });
+    }
+
+    // INICIALIZAR CÁMARA CON WEBRTC (Con manejo seguro para Iframe)
+    function initCamera() {
+      videoElem = document.getElementById('camera-feed');
+      cvCanvas = document.getElementById('cv-canvas');
+      cvCtx = cvCanvas.getContext('2d', { willReadFrequently: true });
+
+      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } },
+          audio: false
+        })
+        .then((stream) => {
+          cameraStream = stream;
+          videoElem.srcObject = stream;
+        })
+        .catch((err) => {
+          console.warn('Cámara no disponible o permisos denegados. Modo simulador activado.', err);
+          videoElem.style.backgroundColor = '#04100c';
+        });
+      } else {
+        videoElem.style.backgroundColor = '#04100c';
+      }
+    }
+
+    // MOTOR 3D THREE.JS EN ESPACIO AR
+    function initThreeAR() {
+      const canvas = document.getElementById('three-ar-canvas');
+      renderer = new THREE.WebGLRenderer({ canvas: canvas, alpha: true, antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+      scene = new THREE.Scene();
+
+      camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+      camera.position.set(0, 0, 0);
+
+      const ambientLight = new THREE.AmbientLight(0xffffff, 0.9);
+      scene.add(ambientLight);
+
+      const dirLight = new THREE.DirectionalLight(0x34d399, 1.2);
+      dirLight.position.set(2, 4, 3);
+      scene.add(dirLight);
+
+      // Grupo anclado 3D
+      anchoredGroup = new THREE.Group();
+      anchoredGroup.position.set(0, 0, -2.5);
+      scene.add(anchoredGroup);
+
+      // 1. Anillo Holográfico de Base
+      const ringGeo = new THREE.RingGeometry(0.75, 0.82, 32);
+      const ringMat = new THREE.MeshBasicMaterial({ color: 0x34d399, side: THREE.DoubleSide, transparent: true, opacity: 0.85 });
+      holoRingMesh = new THREE.Mesh(ringGeo, ringMat);
+      holoRingMesh.rotation.x = Math.PI / 2;
+      anchoredGroup.add(holoRingMesh);
+
+      // 2. Tarjeta 3D Flotante con Foto del Ave
+      const planeGeo = new THREE.PlaneGeometry(1.3, 0.95);
+      const textureLoader = new THREE.TextureLoader();
+      
+      const initialTexture = textureLoader.load(BIRD_DATABASE[0].img);
+      const planeMat = new THREE.MeshStandardMaterial({
+        map: initialTexture,
+        side: THREE.DoubleSide,
+        roughness: 0.3,
+        metalness: 0.1,
+        transparent: true,
+        opacity: 0.95
+      });
+      birdPlaneMesh = new THREE.Mesh(planeGeo, planeMat);
+      birdPlaneMesh.position.y = 0.65;
+      anchoredGroup.add(birdPlaneMesh);
+
+      // 3. Partículas Ambientales 3D
+      const partCount = 35;
+      const partGeo = new THREE.BufferGeometry();
+      const positions = new Float32Array(partCount * 3);
+      for (let i = 0; i < partCount * 3; i += 3) {
+        positions[i] = (Math.random() - 0.5) * 1.8;
+        positions[i+1] = Math.random() * 1.6;
+        positions[i+2] = (Math.random() - 0.5) * 1.8;
+      }
+      partGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      const partMat = new THREE.PointsMaterial({ color: 0x34d399, size: 0.045, transparent: true, opacity: 0.75 });
+      particleSystem = new THREE.Points(partGeo, partMat);
+      anchoredGroup.add(particleSystem);
+
+      window.addEventListener('resize', onWindowResize);
+
+      // Iniciar bucle de animación
+      animateAR();
+    }
+
+    function onWindowResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    // BUCLE DE ANIMACIÓN Y RASTREO
+    let clock = new THREE.Clock();
+    let frameCounter = 0;
+
+    function animateAR() {
+      requestAnimationFrame(animateAR);
+      const elapsedTime = clock.getElapsedTime();
+      frameCounter++;
+
+      // Analizar fotogramas de cámara cada 5 cuadros
+      if (frameCounter % 5 === 0 && videoElem && videoElem.readyState === videoElem.HAVE_ENOUGH_DATA) {
+        trackMarkerFromCamera();
+      }
+
+      // Suavizar movimiento 3D (Lerp)
+      anchoredGroup.position.lerp(targetPos, 0.12);
+
+      // Flotación suave de la tarjeta 3D
+      if (birdPlaneMesh) {
+        birdPlaneMesh.position.y = 0.65 + Math.sin(elapsedTime * 2.5) * 0.05;
+        birdPlaneMesh.rotation.y = Math.sin(elapsedTime * 1.2) * 0.12;
+      }
+
+      if (holoRingMesh) {
+        holoRingMesh.rotation.z = elapsedTime * 0.6;
+      }
+
+      if (particleSystem) {
+        particleSystem.rotation.y = elapsedTime * 0.25;
+      }
+
+      // Actualizar telemetría de distancia
+      const dist = anchoredGroup.position.distanceTo(camera.position);
+      document.getElementById('hud-distance').textContent = `${dist.toFixed(2)}m`;
+
+      renderer.render(scene, camera);
+    }
+
+    // SEGUIMIENTO COMPUTER VISION EN TIEMPO REAL DESDE CÁMARA
+    function trackMarkerFromCamera() {
+      cvCanvas.width = 160;
+      cvCanvas.height = 120;
+      cvCtx.drawImage(videoElem, 0, 0, 160, 120);
+
+      const frameData = cvCtx.getImageData(0, 0, 160, 120).data;
+      const targetRGB = currentBird.targetRGB;
+
+      let sumX = 0, sumY = 0, count = 0;
+
+      for (let i = 0; i < frameData.length; i += 16) {
+        const r = frameData[i];
+        const g = frameData[i+1];
+        const b = frameData[i+2];
+
+        const distColor = Math.sqrt(
+          Math.pow(r - targetRGB[0], 2) +
+          Math.pow(g - targetRGB[1], 2) +
+          Math.pow(b - targetRGB[2], 2)
+        );
+
+        if (distColor < 75) {
+          const pixelIdx = i / 4;
+          const x = pixelIdx % 160;
+          const y = Math.floor(pixelIdx / 160);
+          sumX += x;
+          sumY += y;
+          count++;
+        }
+      }
+
+      if (count > 15) {
+        const avgX = sumX / count;
+        const avgY = sumY / count;
+
+        const normalizedX = (avgX / 160 - 0.5) * 3.5;
+        const normalizedY = -(avgY / 120 - 0.5) * 2.5;
+
+        targetPos.set(normalizedX, normalizedY, -2.2);
+        
+        document.getElementById('ar-status-text').textContent = `ANCLADO: ${currentBird.name.toUpperCase()}`;
+        document.getElementById('tracking-dot').className = 'w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping';
+      }
+    }
+
+    // CAMBIAR AVE ANCLADA Y ACTUALIZAR COMPONENTES
+    function setAnchoredBird(birdId) {
+      const bird = BIRD_DATABASE.find(b => b.id === birdId);
+      if (!bird) return;
+
+      currentBird = bird;
+
+      // Actualizar textura 3D
+      const textureLoader = new THREE.TextureLoader();
+      textureLoader.load(bird.img, (tex) => {
+        birdPlaneMesh.material.map = tex;
+        birdPlaneMesh.material.needsUpdate = true;
+      });
+
+      // Actualizar color de anillo
+      holoRingMesh.material.color.setHex(bird.color);
+
+      // Simular ligero desplazamiento de enfoque
+      targetPos.set(
+        (Math.random() - 0.5) * 0.4,
+        (Math.random() - 0.5) * 0.2,
+        -2.3
+      );
+
+      // Actualizar UI
+      document.getElementById('ar-status-text').textContent = `ANCLADO: ${bird.name.toUpperCase()}`;
+      document.getElementById('card-bird-name').textContent = bird.name;
+      document.getElementById('card-bird-scientific').textContent = bird.scientific;
+      document.getElementById('card-bird-habitat').textContent = bird.habitat;
+      document.getElementById('card-bird-desc').textContent = bird.desc;
+
+      const card = document.getElementById('bird-info-card');
+      card.classList.remove('opacity-0', 'translate-y-8', 'pointer-events-none');
+
+      // Resaltar botón activo en carrusel
+      document.querySelectorAll('.btn-select-target').forEach(btn => {
+        if (btn.getAttribute('data-bird') === birdId) {
+          btn.classList.add('border-emerald-400', 'bg-emerald-900/60');
+        } else {
+          btn.classList.remove('border-emerald-400', 'bg-emerald-900/60');
+        }
+      });
+
+      // Reproducir sonido si no está silenciado
+      if (!isMuted) {
+        playBirdAudioCall(bird);
+      }
+    }
+
+    // SINTETIZADOR DE CANTO CON WEB AUDIO API
+    function initAudio() {
+      if (!audioCtx) {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (AudioCtx) audioCtx = new AudioCtx();
+      }
+      if (audioCtx && audioCtx.state === 'suspended') {
+        audioCtx.resume();
+      }
+    }
+
+    function playBirdAudioCall(bird) {
+      initAudio();
+      if (!audioCtx) return;
+
+      const now = audioCtx.currentTime;
+      const freq = bird.audioFreq;
+      const type = bird.audioType;
+
+      if (type === 'duet') {
+        // Canto a dúo (Hornero)
+        for (let i = 0; i < 10; i++) {
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          osc.type = 'triangle';
+          const t = now + (i * 0.07);
+          osc.frequency.setValueAtTime(freq + (i % 2 === 0 ? 160 : -100), t);
+
+          gain.gain.setValueAtTime(0.2, t);
+          gain.gain.exponentialRampToValueAtTime(0.001, t + 0.06);
+
+          osc.connect(gain);
+          gain.connect(audioCtx.destination);
+          osc.start(t);
+          osc.stop(t + 0.07);
+        }
+      } else if (type === 'benteveo') {
+        // Trisílabo "Bien-te-veo"
+        [0, 0.12, 0.28].forEach((delay, idx) => {
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          osc.type = 'sine';
+          const t = now + delay;
+          const f = idx === 1 ? freq + 200 : freq;
+          osc.frequency.setValueAtTime(f, t);
+
+          gain.gain.setValueAtTime(0.25, t);
+          gain.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+
+          osc.connect(gain);
+          gain.connect(audioCtx.destination);
+          osc.start(t);
+          osc.stop(t + 0.11);
+        });
+      } else if (type === 'chingolo') {
+        // Canto clásico de 3 silbidos + trino
+        [0, 0.15, 0.3].forEach((delay, idx) => {
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          osc.type = 'sine';
+          const t = now + delay;
+          osc.frequency.setValueAtTime(freq - (idx * 150), t);
+
+          gain.gain.setValueAtTime(0.2, t);
+          gain.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+
+          osc.connect(gain);
+          gain.connect(audioCtx.destination);
+          osc.start(t);
+          osc.stop(t + 0.13);
+        });
+      } else if (type === 'coo') {
+        // Arrullo suave de paloma / torcaza
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, now);
+        osc.frequency.linearRampToValueAtTime(freq - 80, now + 0.4);
+
+        gain.gain.setValueAtTime(0.01, now);
+        gain.gain.linearRampToValueAtTime(0.3, now + 0.1);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
+
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start(now);
+        osc.stop(now + 0.46);
+      } else if (type === 'squawk') {
+        // Cháchara de cotorra / loro
+        for (let i = 0; i < 4; i++) {
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          osc.type = 'sawtooth';
+          const t = now + (i * 0.08);
+          osc.frequency.setValueAtTime(freq, t);
+          osc.frequency.linearRampToValueAtTime(freq - 400, t + 0.06);
+
+          gain.gain.setValueAtTime(0.2, t);
+          gain.gain.exponentialRampToValueAtTime(0.001, t + 0.06);
+
+          osc.connect(gain);
+          gain.connect(audioCtx.destination);
+          osc.start(t);
+          osc.stop(t + 0.07);
+        }
+      } else if (type === 'tero') {
+        // Grito estridente teru-teru
+        [0, 0.12].forEach((delay) => {
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          osc.type = 'sawtooth';
+          const t = now + delay;
+          osc.frequency.setValueAtTime(freq, t);
+          osc.frequency.exponentialRampToValueAtTime(freq - 600, t + 0.09);
+
+          gain.gain.setValueAtTime(0.25, t);
+          gain.gain.exponentialRampToValueAtTime(0.001, t + 0.09);
+
+          osc.connect(gain);
+          gain.connect(audioCtx.destination);
+          osc.start(t);
+          osc.stop(t + 0.1);
+        });
+      } else {
+        // Trino genérico / agudo
+        for (let i = 0; i < 5; i++) {
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          osc.type = 'sine';
+          const t = now + (i * 0.09);
+          osc.frequency.setValueAtTime(freq, t);
+          osc.frequency.linearRampToValueAtTime(freq - 300, t + 0.07);
+
+          gain.gain.setValueAtTime(0.2, t);
+          gain.gain.exponentialRampToValueAtTime(0.001, t + 0.07);
+
+          osc.connect(gain);
+          gain.connect(audioCtx.destination);
+          osc.start(t);
+          osc.stop(t + 0.08);
+        }
+      }
+    }
+
+    // POBLAR MODALES (MARCADORES Y CATÁLOGO)
+    function populateModals() {
+      // 1. Grid de Marcadores
+      const markersGrid = document.getElementById('markers-grid');
+      markersGrid.innerHTML = '';
+
+      BIRD_DATABASE.forEach(bird => {
+        const hexColor = '#' + bird.color.toString(16).padStart(6, '0');
+        const card = document.createElement('div');
+        card.className = 'bg-slate-900 border border-emerald-500/30 hover:border-emerald-400 p-3 rounded-2xl flex flex-col items-center shadow cursor-pointer hover:scale-105 transition group';
+        card.innerHTML = `
+          <div class="bg-white p-2 rounded-xl border-2 border-slate-950 flex flex-col items-center">
+            <svg class="w-20 h-20" viewBox="0 0 100 100">
+              <rect width="100" height="100" fill="black" />
+              <rect x="12" y="12" width="76" height="76" fill="white" />
+              <circle cx="50" cy="50" r="24" fill="${hexColor}" />
+              <circle cx="50" cy="50" r="10" fill="black" />
+            </svg>
+          </div>
+          <span class="text-[10px] font-bold mt-2 text-emerald-200 group-hover:text-emerald-400 uppercase text-center truncate w-full">${bird.name}</span>
+          <span class="text-[9px] text-slate-400 font-mono">${bird.id}</span>
+        `;
+        card.addEventListener('click', () => {
+          setAnchoredBird(bird.id);
+          closeModal('markers-modal');
+        });
+        markersGrid.appendChild(card);
+      });
+
+      // 2. Catálogo Completo de 22 Aves
+      const catalogList = document.getElementById('catalog-list');
+      catalogList.innerHTML = '';
+
+      BIRD_DATABASE.forEach((bird, index) => {
+        const hexColor = '#' + bird.color.toString(16).padStart(6, '0');
+        const item = document.createElement('div');
+        item.className = 'bg-slate-900/90 border border-emerald-500/20 hover:border-emerald-400 p-3 rounded-2xl flex items-start gap-3 cursor-pointer transition';
+        item.innerHTML = `
+          <div class="w-10 h-10 rounded-xl flex items-center justify-center font-bold text-xs flex-shrink-0 text-white" style="background-color: ${hexColor}">
+            ${index + 1}
+          </div>
+          <div class="overflow-hidden">
+            <div class="flex items-center gap-2">
+              <h4 class="font-bold text-sm text-white truncate">${bird.name}</h4>
+            </div>
+            <p class="text-[11px] italic text-emerald-300 font-serif truncate">${bird.scientific}</p>
+            <p class="text-[10px] text-slate-400 mt-1 line-clamp-2">${bird.desc}</p>
+          </div>
+        `;
+        item.addEventListener('click', () => {
+          setAnchoredBird(bird.id);
+          closeModal('catalog-modal');
+        });
+        catalogList.appendChild(item);
+      });
+    }
+
+    // EVENTOS DE INTERFAZ Y MODALES
+    function setupUIEvents() {
+      // Conmutar Máscara Binocular HUD
+      document.getElementById('btn-toggle-hud').addEventListener('click', () => {
+        hudVisible = !hudVisible;
+        const mask = document.getElementById('binocular-overlay');
+        const reticle = document.getElementById('center-reticle');
+        
+        mask.style.opacity = hudVisible ? '1' : '0';
+        reticle.style.opacity = hudVisible ? '1' : '0.25';
+      });
+
+      // Conmutar Audio
+      document.getElementById('btn-audio-toggle').addEventListener('click', () => {
+        isMuted = !isMuted;
+        const icon = document.getElementById('icon-audio');
+        if (isMuted) {
+          icon.setAttribute('data-lucide', 'volume-x');
+        } else {
+          icon.setAttribute('data-lucide', 'volume-2');
+          playBirdAudioCall(currentBird);
+        }
+        try { lucide.createIcons(); } catch(e){}
+      });
+
+      // Botón Reproducción Manual de Canto
+      document.getElementById('btn-play-call').addEventListener('click', () => {
+        playBirdAudioCall(currentBird);
+      });
+
+      // Resetear Posición AR
+      document.getElementById('btn-reset-target').addEventListener('click', () => {
+        targetPos.set(0, 0, -2.3);
+      });
+
+      // Control Zoom
+      document.getElementById('btn-zoom-in').addEventListener('click', () => {
+        currentZoom = Math.min(2.5, currentZoom + 0.25);
+        document.getElementById('camera-feed').style.transform = `scale(${currentZoom})`;
+        document.getElementById('zoom-label').textContent = `${currentZoom.toFixed(1)}x`;
+      });
+
+      document.getElementById('btn-zoom-out').addEventListener('click', () => {
+        currentZoom = Math.max(1.0, currentZoom - 0.25);
+        document.getElementById('camera-feed').style.transform = `scale(${currentZoom})`;
+        document.getElementById('zoom-label').textContent = `${currentZoom.toFixed(1)}x`;
+      });
+
+      // Modal Marcadores
+      document.getElementById('btn-show-markers').addEventListener('click', () => openModal('markers-modal'));
+      document.getElementById('btn-close-markers').addEventListener('click', () => closeModal('markers-modal'));
+
+      // Imprimir Marcadores en nueva ventana
+      document.getElementById('btn-print-markers').addEventListener('click', () => {
+        const printWindow = window.open('', '_blank');
+        if (!printWindow) return;
+
+        let printableHTML = `
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <title>Marcadores AR - Observador de Aves Patagónicas</title>
+            <style>
+              body { font-family: sans-serif; padding: 20px; text-align: center; color: #111; }
+              h1 { margin-bottom: 5px; font-size: 20px; }
+              p { font-size: 12px; color: #555; margin-bottom: 20px; }
+              .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; page-break-inside: avoid; }
+              .card { border: 2px dashed #999; padding: 15px; border-radius: 12px; display: flex; flex-direction: column; align-items: center; }
+              .marker { width: 140px; height: 140px; }
+              .title { font-weight: bold; font-size: 13px; margin-top: 8px; text-transform: uppercase; }
+              .sub { font-style: italic; font-size: 11px; color: #666; }
+              @media print {
+                button { display: none; }
+              }
+            </style>
+          </head>
+          <body>
+            <h1>Marcadores para Binoculares AR - 22 Aves Patagónicas y Argentinas</h1>
+            <p>Recortá o mostrá estos patrones a la cámara de la aplicación para rastrear el ave en Realidad Aumentada.</p>
+            <button onclick="window.print()" style="padding: 10px 20px; background: #059669; color: white; border: none; border-radius: 8px; cursor: pointer; margin-bottom: 20px; font-weight: bold;">Imprimir / Guardar PDF</button>
+            <div class="grid">
+        `;
+
+        BIRD_DATABASE.forEach(bird => {
+          const hexColor = '#' + bird.color.toString(16).padStart(6, '0');
+          printableHTML += `
+            <div class="card">
+              <svg class="marker" viewBox="0 0 100 100">
+                <rect width="100" height="100" fill="black" />
+                <rect x="12" y="12" width="76" height="76" fill="white" />
+                <circle cx="50" cy="50" r="24" fill="${hexColor}" />
+                <circle cx="50" cy="50" r="10" fill="black" />
+              </svg>
+              <div class="title">${bird.name}</div>
+              <div class="sub">${bird.scientific}</div>
+            </div>
+          `;
+        });
+
+        printableHTML += `</div></body></html>`;
+
+        printWindow.document.write(printableHTML);
+        printWindow.document.close();
+      });
+
+      // Modal Catálogo
+      document.getElementById('btn-toggle-catalog').addEventListener('click', () => openModal('catalog-modal'));
+      document.getElementById('btn-close-catalog').addEventListener('click', () => closeModal('catalog-modal'));
+    }
+
+    function openModal(id) {
+      const modal = document.getElementById(id);
+      modal.classList.remove('hidden');
+      setTimeout(() => modal.classList.remove('opacity-0'), 10);
+    }
+
+    function closeModal(id) {
+      const modal = document.getElementById(id);
+      modal.classList.add('opacity-0');
+      setTimeout(() => modal.classList.add('hidden'), 300);
+    }
+  </script>
+</body>
+</html>
